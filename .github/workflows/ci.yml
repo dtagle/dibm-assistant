@@ -1,0 +1,93 @@
+# Pipeline de CI del DIBM Assistant (spec 04, punto 6).
+# Cuatro trabajos encadenados: cada uno corre solo si el anterior pasó.
+# Render publica solo si todo el pipeline pasa (autoDeployTrigger: checksPass).
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  style:
+    name: style
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+      - name: Pylint con 88 columnas
+        run: >-
+          python -m pylint app tests --max-line-length=88 --fail-under=10
+          --disable=missing-function-docstring,redefined-outer-name,too-few-public-methods
+
+  unit:
+    name: unit
+    needs: style
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+      - name: Pruebas unitarias y BDD con cobertura de 80 % o más
+        run: python -m pytest tests --cov=app --cov-fail-under=80
+
+  e2e:
+    name: e2e
+    needs: unit
+    runs-on: ubuntu-latest
+    env:
+      # Clave de prueba de ejemplo: no es un secreto, solo existe en esta corrida
+      CI_TEST_KEY: ci-example-key-0123456789
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+      - name: Instalar Chromium para Playwright
+        run: python -m playwright install --with-deps chromium
+      - name: Arrancar el producto con el modelo simulado
+        env:
+          MODEL_PROVIDER: fake
+          API_KEYS: ci:${{ env.CI_TEST_KEY }}
+          RATE_LIMIT_PER_MINUTE: "1000"
+        run: |
+          python -m uvicorn app.main:app --port 8000 > uvicorn.log 2>&1 &
+          # Espera hasta 20 segundos a que /health responda
+          for _ in $(seq 1 40); do
+            if curl -fs http://127.0.0.1:8000/health > /dev/null; then
+              exit 0
+            fi
+            sleep 0.5
+          done
+          cat uvicorn.log
+          exit 1
+      - name: Pruebas de punta a punta
+        env:
+          E2E_API_KEY: ${{ env.CI_TEST_KEY }}
+        run: python -m pytest e2e -q --base-url http://127.0.0.1:8000
+      - name: Log del producto si algo falla
+        if: failure()
+        run: cat uvicorn.log || true
+
+  docker:
+    name: docker
+    needs: e2e
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Construir la imagen
+        run: docker build -t dibm-assistant:ci .

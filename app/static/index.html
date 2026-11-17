@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DIBM Assistant · Banco de México</title>
+  <style>
+    body {
+      font-family: system-ui, sans-serif;
+      max-width: 760px;
+      margin: 2rem auto;
+      padding: 0 1rem;
+      color: #1d2a3a;
+    }
+    h1 { font-size: 1.5rem; }
+    .examples { color: #4a5868; font-size: 0.95rem; }
+    form { display: flex; gap: 0.5rem; margin: 1rem 0; }
+    textarea { flex: 1; min-height: 3rem; font: inherit; padding: 0.5rem; }
+    button { font: inherit; padding: 0.5rem 1rem; cursor: pointer; }
+    .turn { border-radius: 6px; padding: 0.75rem; margin: 0.5rem 0; }
+    .user { background: #e8eef6; }
+    .assistant { background: #f4f4f4; }
+    .error { background: #fde8e8; color: #8a1c1c; }
+    .text { white-space: pre-wrap; overflow-wrap: anywhere; }
+    .tools { font-size: 0.85rem; color: #4a5868; margin-top: 0.4rem; }
+    .key { display: flex; gap: 0.5rem; align-items: center; }
+    .key input { flex: 1; font: inherit; padding: 0.4rem; }
+  </style>
+</head>
+<body>
+  <h1>DIBM Assistant · Banco de México</h1>
+  <p class="examples">
+    Pregunta sobre los Documentos de Investigación del Banco de México. Por ejemplo:
+    «¿De qué trata el documento 2025-12?», «¿Qué ha publicado García?»,
+    «¿Cuáles son las últimas publicaciones?» o «Publicaciones sobre inflación».
+  </p>
+  <p class="key">
+    <label for="api-key">Clave de acceso</label>
+    <input data-testid="api-key" id="api-key" type="password"
+           autocomplete="off" spellcheck="false"
+           placeholder="Escribe la clave que te dieron">
+  </p>
+  <form id="ask-form">
+    <textarea data-testid="question" id="question" maxlength="2000"
+              placeholder="Escribe tu pregunta"></textarea>
+    <button data-testid="send" id="send" type="submit">Enviar</button>
+  </form>
+  <div data-testid="answer" id="answer" aria-live="polite"></div>
+  <script>
+    (function () {
+      "use strict";
+      var history = [];
+      var form = document.getElementById("ask-form");
+      var input = document.getElementById("question");
+      var button = document.getElementById("send");
+      var conversation = document.getElementById("answer");
+      var keyInput = document.getElementById("api-key");
+      // La clave vive solo en sessionStorage: se borra al cerrar la pestaña.
+      var KEY_STORAGE = "dibm-api-key";
+
+      function readKey() {
+        try {
+          return window.sessionStorage.getItem(KEY_STORAGE) || "";
+        } catch (ignored) {
+          return "";
+        }
+      }
+
+      function saveKey(value) {
+        try {
+          if (value) {
+            window.sessionStorage.setItem(KEY_STORAGE, value);
+          } else {
+            window.sessionStorage.removeItem(KEY_STORAGE);
+          }
+        } catch (ignored) {
+          // Sin almacenamiento de sesión la clave se lee del campo.
+        }
+      }
+
+      keyInput.value = readKey();
+      keyInput.addEventListener("input", function () {
+        saveKey(keyInput.value.trim());
+      });
+
+      // Mensaje en español según el código de la respuesta.
+      function failureMessage(failure) {
+        if (failure && failure.status === 401) {
+          return "Clave inválida";
+        }
+        if (failure && failure.status === 429) {
+          var seconds = parseInt(failure.retryAfter, 10);
+          if (!(seconds > 0)) {
+            seconds = 60;
+          }
+          return "Demasiadas preguntas; espera " + seconds + " segundos";
+        }
+        return "No se pudo obtener una respuesta. Intenta de nuevo.";
+      }
+
+      // Agrega una línea de detalle (herramientas o id) con textContent.
+      function addDetail(turn, className, text) {
+        var info = document.createElement("div");
+        info.className = className;
+        info.textContent = text;
+        turn.appendChild(info);
+      }
+
+      // Pinta un turno con textContent: el texto nunca se interpreta como HTML.
+      // El request_id se muestra para que la persona lo pase a soporte.
+      function addTurn(kind, text, tools, requestId) {
+        var turn = document.createElement("div");
+        turn.className = "turn " + kind;
+        var body = document.createElement("div");
+        body.className = "text";
+        body.textContent = text;
+        turn.appendChild(body);
+        if (tools) {
+          addDetail(turn, "tools", "Herramientas usadas: " +
+            (tools.length ? tools.join(", ") : "ninguna"));
+        }
+        if (requestId) {
+          addDetail(turn, "tools request-id",
+            "Id de la petición (request_id) para soporte: " + String(requestId));
+        }
+        conversation.appendChild(turn);
+      }
+
+      form.addEventListener("submit", function (event) {
+        event.preventDefault();
+        var question = input.value.trim();
+        if (!question) {
+          // La validación vive aquí: el aviso se pinta dentro de la página.
+          addTurn("error", "Escribe una pregunta antes de enviarla.", null);
+          input.focus();
+          return;
+        }
+        addTurn("user", question, null);
+        input.value = "";
+        button.disabled = true;
+        var apiKey = keyInput.value.trim();
+        saveKey(apiKey);
+        var headers = { "Content-Type": "application/json" };
+        if (apiKey) {
+          headers["X-API-Key"] = apiKey;
+        }
+        fetch("/ask", {
+          method: "POST",
+          headers: headers,
+          body: JSON.stringify({ question: question, history: history })
+        }).then(function (response) {
+          if (!response.ok) {
+            var failure = new Error("status " + response.status);
+            failure.status = response.status;
+            failure.retryAfter = response.headers.get("Retry-After");
+            failure.requestId = response.headers.get("X-Request-ID");
+            throw failure;
+          }
+          return response.json();
+        }).then(function (data) {
+          addTurn("assistant", String(data.answer), data.tools_used || [],
+            data.request_id);
+          history.push({ role: "user", content: question });
+          history.push({ role: "assistant", content: String(data.answer) });
+        }).catch(function (failure) {
+          addTurn("error", failureMessage(failure), null,
+            failure && failure.requestId);
+        }).finally(function () {
+          button.disabled = false;
+          input.focus();
+        });
+      });
+    })();
+  </script>
+</body>
+</html>

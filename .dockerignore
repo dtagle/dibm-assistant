@@ -1,0 +1,30 @@
+# Lo que nunca entra en la imagen (spec 04, punto 5)
+
+# Secretos
+.env
+.env.*
+!.env.example
+
+# Pruebas
+tests/
+e2e/
+
+# Cachés y artefactos
+__pycache__/
+**/__pycache__/
+*.pyc
+.pytest_cache/
+.pylint.d/
+.coverage
+htmlcov/
+
+# Entornos y control de versiones
+.venv/
+venv/
+.git/
+.github/
+
+# Lo que el servicio no usa en tiempo de ejecución
+doc/
+scripts/
+render.yaml
